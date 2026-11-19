@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Secrets & local runtime data
+.env
+state.json
+
+# Corrupt state files kept for forensics (research §7)
+fixtures/*.corrupt-*
+state.json.corrupt-*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
