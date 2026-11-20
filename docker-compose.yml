@@ -1,0 +1,46 @@
+# botalert — build and deploy (mirrors the README "Run in a container" run).
+#
+#   cp .env.example .env          # then fill in the five required values
+#   mkdir -p data && chmod 777 data
+#   docker compose up -d --build
+#
+# State lives at ./data/state.json on the host filesystem (bind-mounted to
+# /data) and survives redeploys. Configuration comes purely from .env; the
+# image default STATE_FILE=/data/state.json applies, so .env must NOT set
+# STATE_FILE (its local-dev value state.json would override the default
+# and point the app at root-owned /app).
+services:
+  botalert:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: botalert
+    container_name: botalert
+    # All configuration (the five required vars + optionals) from .env.
+    env_file:
+      - .env
+    ports:
+      # Host port overridable: BOTALERT_HOST_PORT=9000 docker compose up
+      - "${BOTALERT_HOST_PORT:-8080}:8080"
+    # The directory (not the file) is mounted: the state store saves
+    # atomically via <file>.tmp + rename — and quarantines corrupt files
+    # as <file>.corrupt-<stamp> — in the state file's own directory.
+    # The container runs as the non-root user `botalert` (uid 1000); on
+    # Docker Desktop for Mac the host dir appears owned by the host user,
+    # so it needs world-writable perms for the app to save (chmod 777).
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    # Liveness probe. The image is python:slim (no curl), so probe with
+    # stdlib urllib against the public, auth-free /api/health endpoint
+    # (200 {"status": "ok", "gateway_connected": ..., "cycle_in_progress": ...}).
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, sys, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:%s/api/health' % os.environ.get('PORT', '8080'), timeout=5); sys.exit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

@@ -7,6 +7,7 @@ __pycache__/
 # Secrets & local runtime data
 .env
 state.json
+data/
 
 # Corrupt state files kept for forensics (research §7)
 fixtures/*.corrupt-*
