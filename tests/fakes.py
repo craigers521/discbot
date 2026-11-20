@@ -3,7 +3,8 @@
 Every network I/O the product performs — page fetch, webhook POST,
 management-channel send, wall-clock — sits behind one of these fakes so
 the full suite is deterministic and offline. The Discord gateway harness
-(US2) is added here when botalert/discord_bot.py lands.
+(FakeChannel/FakeMessage) drives BotalertClient's on_ready /
+on_message_delete / channel-notice paths without a real gateway.
 """
 
 from __future__ import annotations
@@ -11,8 +12,12 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+
+from discord.ui import View
 
 from botalert.fetcher import FetchResult
+from botalert.state import StateStore
 
 
 class FakeFetcher:
@@ -130,3 +135,85 @@ class FakeScheduler:
 
     def stop(self) -> None:
         self.wakeups.append(False)
+
+
+class FakeMessage:
+    """DiscordMessage stand-in: a channel message with an int id."""
+
+    def __init__(self, message_id: int) -> None:
+        self.message_id: int = message_id
+        self.deleted: bool = False
+
+    async def delete(self) -> None:
+        self.deleted = True
+
+
+class SpyStore:
+    """StateStore wrapper recording every forwarded method call by name.
+
+    SC-007 (non-owner interactions must not read or alter state): route
+    against a SpyStore and assert ``calls == []`` afterwards. Forwards to
+    the real store, so owner-side assertions still see true behavior.
+    """
+
+    def __init__(self, inner: StateStore) -> None:
+        self._inner: StateStore = inner
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        def call(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append(name)
+            return getattr(self._inner, name)(*args, **kwargs)
+
+        return call
+
+
+class FakeChannel:
+    """DiscordChannel stand-in implementing the ChannelPort seam.
+
+    Records posted messages as (id, content, view) tuples in `sent` and
+    removes deleted ids from `messages`. `seed(message_id)` plants a
+    previously posted control message so on_ready's "delete the prior
+    message" path is testable; `fail_get_message` makes get_message
+    return None (missing-message tolerance).
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str, View | None]] = []
+        self.messages: dict[int, FakeMessage] = {}
+        self.deleted_ids: list[int] = []
+        self._next_id = 1000
+        self.fail_get_message = False
+
+    def seed(self, message_id: int) -> None:
+        self.messages[message_id] = FakeMessage(message_id)
+
+    def last(self) -> tuple[int, str, View | None]:
+        if not self.sent:
+            raise AssertionError("no messages sent yet")
+        return self.sent[-1]
+
+    def child_names(self, view: View) -> list[tuple[str, str | None, str | None]]:
+        """[(type name, custom_id, url)] for each child of a posted view."""
+        out: list[tuple[str, str | None, str | None]] = []
+        for child in view.children:
+            out.append(
+                (
+                    type(child).__name__,
+                    getattr(child, "custom_id", None),
+                    getattr(child, "url", None),
+                )
+            )
+        return out
+
+    async def send(self, content: str, view: View | None) -> FakeMessage:
+        self._next_id += 1
+        message = FakeMessage(self._next_id)
+        self.messages[self._next_id] = message
+        self.sent.append((self._next_id, content, view))
+        return message
+
+    async def get_message(self, message_id: int) -> FakeMessage | None:
+        if self.fail_get_message:
+            return None
+        return self.messages.get(message_id)

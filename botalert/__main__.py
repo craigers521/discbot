@@ -1,20 +1,24 @@
-"""Entrypoint: ``python -m botalert`` (task T024).
+"""Entrypoint: ``python -m botalert`` (tasks T024, T031).
 
-Wires the US1 pieces together:
+Wires the US1 + US2 pieces together:
 
 1. ``load_config()`` — fail fast with a named-variable error when a
    required variable is missing/empty (data-model.md §5).
 2. ``StateStore`` on ``config.state_file`` (durable, atomic).
 3. Cycle dependencies: ``fetch_page`` bound to the configured timeout
-   and user agent; ``send_restock`` bound to the configured webhook;
-   a stdout-logging channel-sender fallback (the real Discord gateway
-   sender is wired in US2, task T031); a wall clock.
-4. ``Scheduler`` background thread (cycle = ``run_cycle``).
-5. Flask app (``web.create_app``) served on the main thread.
+   and user agent; ``send_restock`` bound to the configured webhook; a
+   wall clock. Channel notices go through
+   ``BotalertClient.enqueue_notice`` (gateway post-ready; stdout mirror
+   plus a buffer flushed exactly once on ready pre-ready).
+4. ``BotalertClient`` Discord gateway on a daemon thread — a bad token
+   degrades to gateway-less operation, not a crash (the webhook, API
+   and scheduler keep working).
+5. ``Scheduler`` background thread (cycle = ``run_cycle``).
+6. Flask app (``web.create_app``) served on the main thread.
 
-``SIGINT``/``SIGTERM`` → stop the scheduler (join; no graceful drain
-beyond the in-flight fetch's ``CHECK_TIMEOUT_SECONDS``, research.md §5)
-→ exit 0.
+``SIGINT``/``SIGTERM`` → stop the scheduler and the bot (join; no
+graceful drain beyond the in-flight fetch's ``CHECK_TIMEOUT_SECONDS``,
+research.md §5) → exit 0.
 """
 
 from __future__ import annotations
@@ -23,12 +27,16 @@ import functools
 import logging
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from types import FrameType
 
+import discord
+
 from botalert.checker import FetchFn, RestockFn, run_cycle
 from botalert.config import ConfigError, load_config
+from botalert.discord_bot import BotalertClient
 from botalert.fetcher import fetch_page
 from botalert.models import Product, RuntimeFlags
 from botalert.notifier import send_restock
@@ -51,16 +59,6 @@ class WallClock:
         time.sleep(seconds)
 
 
-def _stdout_channel_sender(text: str) -> None:
-    """US1 management-channel fallback: print the notice to stdout.
-
-    US2 (task T031) replaces this with the Discord gateway channel
-    sender; until then owner notices (📡 / ⚠️) are still delivered —
-    to the operator's console.
-    """
-    print(f"[botalert channel notice] {text}", flush=True)
-
-
 def main() -> int:
     """Run botalert: scheduler thread + Flask on the main thread."""
     logging.basicConfig(
@@ -76,6 +74,7 @@ def main() -> int:
 
     state = StateStore(config.state_file, config)
     flags = RuntimeFlags()
+    bot = BotalertClient(config, state, flags)
 
     fetcher: FetchFn = functools.partial(
         fetch_page,
@@ -94,22 +93,42 @@ def main() -> int:
             snapshot,
             fetcher,
             webhook,
-            _stdout_channel_sender,
+            bot.enqueue_notice,
             state,
             clock,
             pause_seconds=config.check_pause_seconds,
         )
 
+    def _bot_thread() -> None:
+        """Run the Discord gateway; a bad token must not kill the daemon."""
+        try:
+            bot.run(config.discord_token)
+        except discord.LoginFailure:
+            logger.warning(
+                "Discord login failed (invalid DISCORD_TOKEN); "
+                "continuing without the gateway"
+            )
+        except Exception:
+            logger.warning(
+                "Discord gateway error; continuing without the gateway",
+                exc_info=True,
+            )
+
     scheduler = Scheduler(state, flags, cycle)
     scheduler.start()
-    logger.info("scheduler armed; Flask starting on port %d", config.port)
+    bot_thread = threading.Thread(
+        target=_bot_thread, name="botalert-bot", daemon=True
+    )
+    bot_thread.start()
+    logger.info("scheduler armed; bot + Flask starting on port %d", config.port)
 
     app = create_app(config, state, scheduler, flags)
 
     def _shutdown(signum: int, _frame: FrameType | None) -> None:
-        """SIGINT/SIGTERM: stop the scheduler, then exit 0."""
-        logger.info("signal %d received; stopping scheduler", signum)
+        """SIGINT/SIGTERM: stop the scheduler and the bot, then exit 0."""
+        logger.info("signal %d received; stopping scheduler and bot", signum)
         scheduler.stop()
+        bot.stop()
         raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -119,6 +138,7 @@ def main() -> int:
         run_app(app, config)
     finally:
         scheduler.stop()  # idempotent (the signal path already stopped it)
+        bot.stop()  # idempotent (schedules Client.close on the bot loop)
     return 0
 
 
