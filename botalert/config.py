@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from botalert.fetcher import BACKENDS
+
 _DEFAULT_USER_AGENT = "botalert/0.1 (personal stock checker)"
 
 # Order here is the order of the startup error message (first missing wins).
@@ -47,6 +49,7 @@ class Config:
     min_cadence_minutes: float
     max_cadence_minutes: float
     user_agent: str
+    fetch_backend: str
 
 
 def _required(name: str) -> str:
@@ -66,6 +69,18 @@ def _int(name: str, default: int) -> int:
         return int(raw.strip())
     except ValueError:
         raise ConfigError(f"{name} must be an integer, got: {raw!r}") from None
+
+
+def _choice(name: str, default: str, choices: tuple[str, ...]) -> str:
+    """Read an optional enum variable, failing fast on an unknown value."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    if raw not in choices:
+        raise ConfigError(
+            f"{name} must be one of: {'|'.join(choices)}, got: {raw!r}"
+        )
+    return raw
 
 
 def _float(name: str, default: float) -> float:
@@ -102,6 +117,7 @@ def load_config() -> Config:
         min_cadence_minutes=_float("MIN_CADENCE_MINUTES", 1.0),
         max_cadence_minutes=_float("MAX_CADENCE_MINUTES", 1440.0),
         user_agent=os.getenv("USER_AGENT") or _DEFAULT_USER_AGENT,
+        fetch_backend=_choice("FETCH_BACKEND", "auto", BACKENDS),
     )
     if not 1 <= config.port <= 65535:
         raise ConfigError(f"PORT must be between 1 and 65535, got: {config.port}")

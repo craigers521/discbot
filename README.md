@@ -18,10 +18,10 @@ never alert.
 
 ## How stock determination works
 
-Each check fetches the page with `urllib` (configurable `User-Agent`,
-15 s timeout, SSL verification on, no JS rendering) and evaluates the
-raw page text in strict precedence order, case-insensitive substring
-matches:
+Each check fetches the page (configurable `User-Agent`, 15 s timeout,
+SSL verification on, no JS rendering — see *Bot protection* below for
+the fetch backend) and evaluates the raw page text in strict precedence
+order, case-insensitive substring matches:
 
 1. the product's **in-stock indicator** (if set) → `in_stock`
 2. the product's **out-of-stock indicator** (if set) → `out_of_stock`
@@ -42,6 +42,26 @@ consecutive) triggers a once-only ⚠️ owner notice.
 
 **Status legend:** `🟢 in stock` · `🔴 out of stock` · `⚪ unknown (not
 determined yet)`
+
+**Bot protection (WAF).** Several major retailers refuse to serve their
+pages to a plain HTTP client — Walmart returns "Robot or human?",
+Newegg a Cloudflare "Just a moment..." wall, Amazon a soft cookie gate
+(a ~4 KB `validateCaptcha` page served as a 200). `FETCH_BACKEND`
+(default `auto`) handles this without a browser: the plain `urllib`
+fetch goes first, and when the result looks like bot protection (WAF
+status 403/407/429/444/451/503, a 2xx page carrying a known gate
+marker, or a timeout — some WAF edges drop plain clients instead of
+answering with a wall page) the fetch is retried once through
+`curl_cffi` with a full
+Chrome TLS/HTTP-2 identity (`impersonate="chrome"`), which these WAFs
+accept — a *headless browser* is actually refused by Walmart, while the
+impersonated curl client passes. On that pass, Amazon's cookie gate is
+solved in-session (submit the hidden form, refetch with the returned
+cookie). Set `FETCH_BACKEND=http` for the original behavior, or
+`FETCH_BACKEND=curl` to always use the impersonated client (e.g. from
+an IP with a worse reputation). Pages that *still* can't be fetched
+are handled exactly as before: `unknown`, no false alerts, and the
+once-only repeated-failure ⚠️ notice.
 
 **Extending the phrase sets:** the heuristics are two frozen data tables
 (`IN_STOCK_PHRASES`, `OUT_OF_STOCK_PHRASES`) at the top of
@@ -135,7 +155,8 @@ required variables fail fast at startup if missing or empty.
 | `DEFAULT_CADENCE_MINUTES` | ❌ | `5` | initial recheck cadence |
 | `MIN_CADENCE_MINUTES` | ❌ | `1` | enforced cadence floor |
 | `MAX_CADENCE_MINUTES` | ❌ | `1440` | enforced cadence ceiling (24 h) |
-| `USER_AGENT` | ❌ | `botalert/0.1 (personal stock checker)` | User-Agent sent with page fetches |
+| `USER_AGENT` | ❌ | `botalert/0.1 (personal stock checker)` | User-Agent sent with page fetches (`http` backend only; the `curl` backend presents a full Chrome identity) |
+| `FETCH_BACKEND` | ❌ | `auto` | page fetch backend: `http` (plain urllib) / `curl` (Chrome-impersonated curl_cffi, passes retailer WAF walls) / `auto` (http first, one curl retry when a bot wall or WAF-induced timeout is detected) |
 | `LOG_LEVEL` | ❌ | `INFO` | process-wide logging level (`DEBUG` adds stock-phrase match details and page snippets for `unknown` results) |
 
 `python-dotenv` loads `.env` in local development only; the container

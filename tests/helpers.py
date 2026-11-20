@@ -25,6 +25,7 @@ def make_config(
     min_cadence_minutes: float = 1.0,
     max_cadence_minutes: float = 1440.0,
     user_agent: str = "botalert-test",
+    fetch_backend: str = "auto",
 ) -> Config:
     """Build a Config with deterministic test defaults."""
     return Config(
@@ -43,4 +44,5 @@ def make_config(
         min_cadence_minutes=min_cadence_minutes,
         max_cadence_minutes=max_cadence_minutes,
         user_agent=user_agent,
+        fetch_backend=fetch_backend,
     )

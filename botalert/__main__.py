@@ -100,13 +100,14 @@ def main() -> int:
     logger.info(
         "botalert starting: %d watched product(s), cadence %g min, "
         "fetch timeout %ds, inter-fetch pause %ds, failure threshold %d, "
-        "user agent %r, state file %s",
+        "user agent %r, fetch backend %s, state file %s",
         len(state.get_products()),
         state.get_cadence(),
         config.check_timeout_seconds,
         config.check_pause_seconds,
         config.failure_threshold,
         config.user_agent,
+        config.fetch_backend,
         config.state_file,
     )
 
@@ -114,6 +115,7 @@ def main() -> int:
         fetch_page,
         timeout=config.check_timeout_seconds,
         user_agent=config.user_agent,
+        backend=config.fetch_backend,
     )
     # webhook_url is send_restock's FIRST positional parameter and the
     # checker calls it positionally (label, url, detected_at) — bind it

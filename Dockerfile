@@ -1,8 +1,10 @@
 # botalert — personal stock checker (research.md §9).
 #
 # Single stage, pure Python: nothing to build for the pinned dependency
-# set (flask, discord.py, python-dotenv). Runtime deps only — dev deps
-# (pytest, mypy) live in requirements-dev.txt and never enter the image.
+# set (flask, discord.py, python-dotenv, curl_cffi — the last a
+# self-contained manylinux wheel bundling libcurl). Runtime deps only —
+# dev deps (pytest, mypy) live in requirements-dev.txt and never enter
+# the image.
 FROM python:3.15-slim
 
 # Install the pinned runtime deps first (stable layer).
