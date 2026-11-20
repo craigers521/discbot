@@ -74,7 +74,6 @@ def main() -> int:
 
     state = StateStore(config.state_file, config)
     flags = RuntimeFlags()
-    bot = BotalertClient(config, state, flags)
 
     fetcher: FetchFn = functools.partial(
         fetch_page,
@@ -88,7 +87,13 @@ def main() -> int:
     clock = WallClock()
 
     def cycle(snapshot: list[Product]) -> None:
-        """One full check cycle over the scheduler's watch-list snapshot."""
+        """One full check cycle over the scheduler's watch-list snapshot.
+
+        Resolves ``bot`` at call time: the scheduler is constructed below
+        before the client (to hand its ``wakeup`` to the router), but the
+        client is always bound before ``scheduler.start()`` and a cycle
+        can run.
+        """
         run_cycle(
             snapshot,
             fetcher,
@@ -114,7 +119,10 @@ def main() -> int:
                 exc_info=True,
             )
 
+    # Constructed before the client so its ``wakeup`` can be wired into
+    # the router (SC-004: a cadence change ends the current wait).
     scheduler = Scheduler(state, flags, cycle)
+    bot = BotalertClient(config, state, flags, wakeup=scheduler.wakeup)
     scheduler.start()
     bot_thread = threading.Thread(
         target=_bot_thread, name="botalert-bot", daemon=True

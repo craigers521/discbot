@@ -13,7 +13,9 @@ import time
 from pathlib import Path
 
 import pytest
+from flask import Flask
 
+from botalert.api import create_api_blueprint
 from botalert.checker import run_cycle
 from botalert.models import Product, RuntimeFlags
 from botalert.scheduler import Scheduler
@@ -106,6 +108,52 @@ class TestCadence:
         assert wait.timeouts[0] == pytest.approx(300.0)  # initial 5 min
         assert wait.timeouts[1] == pytest.approx(120.0)  # new 2 min cadence
         assert wait.timeouts[2] == pytest.approx(120.0)
+
+
+class TestCadenceViaApi:
+    def test_put_config_next_wait_uses_new_cadence_no_restart(self, tmp_path: Path) -> None:
+        """SC-004 through the full API chain (US3 T034): ``PUT /api/config``
+        (auth → validation → store update under the lock → scheduler wakeup)
+        and the RUNNING scheduler's NEXT wait picks up the new cadence —
+        no restart, 100% of the time (fake clock / scripted wait).
+        """
+        config = make_config()
+        store = StateStore(str(tmp_path / "state.json"), config)
+        flags = RuntimeFlags()
+        wait = ScriptedWait(results=[True, True, True, True])
+        first_cycle = threading.Event()
+        release_first = threading.Event()
+        count = 0
+
+        def cycle_fn(snapshot: list[Product]) -> None:
+            nonlocal count
+            count += 1
+            if count == 1:
+                first_cycle.set()
+                release_first.wait(5.0)
+
+        scheduler = Scheduler(store, flags, cycle_fn, wait=wait, signal=wait.wake)
+        scheduler.start()
+        assert first_cycle.wait(5.0)
+        # The exact production chain: auth header, JSON body, store, wakeup.
+        app = Flask(__name__)
+        app.register_blueprint(create_api_blueprint(config, store, scheduler, flags))
+        with app.test_client() as client:
+            response = client.put(
+                "/api/config",
+                json={"cadence_minutes": 2.0},
+                headers={"X-Botalert-Token": "test-shared-secret"},
+            )
+        assert response.status_code == 200
+        release_first.set()
+        deadline = time.monotonic() + 5
+        while len(wait.timeouts) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        wait.wake()
+        scheduler.stop()
+        assert wait.timeouts[0] == pytest.approx(300.0)  # initial 5 min
+        assert wait.timeouts[1] == pytest.approx(120.0)  # next wait: new 2 min
+        assert wait.timeouts[2] == pytest.approx(120.0)  # ...and after that
 
 
 class TestNoOverlap:

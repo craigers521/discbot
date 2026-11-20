@@ -82,6 +82,8 @@ class TestAuthBoundary:
             ("get", "/api/products", None),
             ("post", "/api/products", {"url": "https://x.example.com/a"}),
             ("post", "/api/check-now", None),
+            ("get", "/api/config", None),
+            ("put", "/api/config", {"cadence_minutes": 30}),
         ]:
             response = getattr(client, method)(url, json=body)
             error = assert_error(response, "unauthorized", 401)
@@ -220,3 +222,88 @@ class TestCheckNow:
         response = client.post("/api/check-now", headers=headers(TOKEN))
         assert_error(response, "cycle_in_progress", 409)
         assert len(scheduler.wakeups) == before  # no second cycle started
+
+
+class TestConfig:
+    """GET/PUT /api/config — the US3 cadence control (SC-004, FR-005/011)."""
+
+    def test_get_default_shape(self, client: Any) -> None:
+        response = client.get("/api/config", headers=headers(TOKEN))
+        assert response.status_code == 200
+        assert response.get_json() == {
+            "cadence_minutes": 5.0,
+            "min_cadence_minutes": 1.0,
+            "max_cadence_minutes": 1440.0,
+        }
+
+    def test_put_updates_state_echoes_and_wakes(
+        self, parts: tuple[Flask, StateStore, FakeScheduler, RuntimeFlags], client: Any
+    ) -> None:
+        state = parts[1]
+        scheduler = parts[2]
+        response = client.put(
+            "/api/config", json={"cadence_minutes": 30}, headers=headers(TOKEN)
+        )
+        assert response.status_code == 200
+        assert response.get_json() == {
+            "cadence_minutes": 30.0,
+            "min_cadence_minutes": 1.0,
+            "max_cadence_minutes": 1440.0,
+        }
+        assert state.get_cadence() == 30.0
+        assert scheduler.wakeups[-1] is True  # takes effect from the next cycle
+
+    def test_put_float_cadence(
+        self, parts: tuple[Flask, StateStore, FakeScheduler, RuntimeFlags], client: Any
+    ) -> None:
+        state = parts[1]
+        response = client.put(
+            "/api/config", json={"cadence_minutes": 2.5}, headers=headers(TOKEN)
+        )
+        assert response.status_code == 200
+        assert response.get_json()["cadence_minutes"] == 2.5
+        assert state.get_cadence() == 2.5
+
+    def test_put_boundaries_inclusive(
+        self, parts: tuple[Flask, StateStore, FakeScheduler, RuntimeFlags], client: Any
+    ) -> None:
+        state = parts[1]
+        for value in (1.0, 1440.0):
+            response = client.put(
+                "/api/config", json={"cadence_minutes": value}, headers=headers(TOKEN)
+            )
+            assert response.status_code == 200, f"{value} must be accepted"
+        assert state.get_cadence() == 1440.0
+
+    def test_put_invalid_rejected_exact_message_state_unchanged_no_wakeup(
+        self, parts: tuple[Flask, StateStore, FakeScheduler, RuntimeFlags], client: Any
+    ) -> None:
+        state = parts[1]
+        scheduler = parts[2]
+        for value in ("abc", 0.5, 2000, True, "5.5", None):
+            response = client.put(
+                "/api/config", json={"cadence_minutes": value}, headers=headers(TOKEN)
+            )
+            error = assert_error(response, "invalid_cadence", 400)
+            assert error["message"] == (
+                "Cadence must be at least 1.0 minutes (minimum) "
+                "and at most 1440.0 minutes (maximum)."
+            )
+        assert state.get_cadence() == 5.0  # unchanged in every case
+        assert scheduler.wakeups == [False]  # no wakeup was issued
+
+    def test_put_missing_key_rejected(
+        self, parts: tuple[Flask, StateStore, FakeScheduler, RuntimeFlags], client: Any
+    ) -> None:
+        state = parts[1]
+        for body in ({}, {"other": 3}, [30]):
+            response = client.put("/api/config", json=body, headers=headers(TOKEN))
+            assert_error(response, "invalid_cadence", 400)
+        assert state.get_cadence() == 5.0
+
+    def test_get_reflects_put(
+        self, parts: tuple[Flask, StateStore, FakeScheduler, RuntimeFlags], client: Any
+    ) -> None:
+        client.put("/api/config", json={"cadence_minutes": 30}, headers=headers(TOKEN))
+        body = client.get("/api/config", headers=headers(TOKEN)).get_json()
+        assert body["cadence_minutes"] == 30.0

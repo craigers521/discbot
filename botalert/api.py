@@ -16,6 +16,13 @@ Serves ``/api/*`` from the shared Flask app:
 - ``POST /api/check-now`` — ``202 {"status": "cycle_scheduled"}`` plus
   scheduler wakeup, or ``409 cycle_in_progress`` (FR-018: no second
   cycle is started while one is in flight).
+- ``GET /api/config`` — current cadence plus the configured floor and
+  ceiling (FR-005).
+- ``PUT /api/config`` — change the cadence (SC-004): only a JSON number
+  (never a bool or a numeric string) within the inclusive ``[min, max]``
+  is accepted; success persists, wakes the scheduler (new interval from
+  the next cycle) and echoes the config shape; failure returns the fixed
+  ``400 invalid_cadence`` and leaves state and the scheduler untouched.
 
 All non-2xx responses use the contract error shape
 ``{"error": {"code": ..., "message": ...}}``. The scheduler seam only
@@ -26,6 +33,7 @@ scheduler implementation).
 from __future__ import annotations
 
 import hmac
+import math
 from typing import Protocol
 
 from flask import Blueprint, Response, jsonify, request
@@ -179,6 +187,57 @@ def create_api_blueprint(
             )
         scheduler.wakeup()
         return jsonify({"status": "cycle_scheduled"}), 202
+
+    @bp.get("/config")
+    def get_config() -> Response:
+        """Current cadence plus the configured floor and ceiling (FR-005)."""
+        return jsonify(
+            {
+                "cadence_minutes": state.get_cadence(),
+                "min_cadence_minutes": config.min_cadence_minutes,
+                "max_cadence_minutes": config.max_cadence_minutes,
+            }
+        )
+
+    @bp.put("/config")
+    def put_config() -> Response | tuple[Response, int]:
+        """Change the cadence (SC-004): validate, persist, wake, echo.
+
+        Body: ``{"cadence_minutes": <number>}``. Only a JSON number
+        (int/float, never a bool or a numeric string) within the
+        inclusive configured ``[min, max]`` is accepted. On success the
+        scheduler is woken so the new interval applies from the next
+        cycle; on failure the store is untouched and nothing is woken,
+        and the fixed ``invalid_cadence`` message is returned (never
+        routed through ``_validation_code``).
+        """
+        payload = request.get_json(silent=True)
+        body: dict[str, object] = payload if isinstance(payload, dict) else {}
+        value = body.get("cadence_minutes")
+        message = (
+            f"Cadence must be at least {float(config.min_cadence_minutes)} "
+            f"minutes (minimum) and at most "
+            f"{float(config.max_cadence_minutes)} minutes (maximum)."
+        )
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return _error("invalid_cadence", message, 400)
+        if not math.isfinite(value):
+            return _error("invalid_cadence", message, 400)
+        if (
+            value < config.min_cadence_minutes
+            or value > config.max_cadence_minutes
+        ):
+            return _error("invalid_cadence", message, 400)
+        minutes = float(value)
+        state.set_cadence(minutes)
+        scheduler.wakeup()  # SC-004: new interval from the next cycle
+        return jsonify(
+            {
+                "cadence_minutes": state.get_cadence(),
+                "min_cadence_minutes": config.min_cadence_minutes,
+                "max_cadence_minutes": config.max_cadence_minutes,
+            }
+        )
 
     return bp
 

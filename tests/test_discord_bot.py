@@ -6,8 +6,10 @@ Two levels, both fully offline (no live gateway connection):
    ``InteractionRequest`` envelopes: owner authorization is the FIRST
    step (SC-007: non-owner → exact rejection, zero state access),
    ``custom_id`` routing for the US2 surface (view / manage / select /
-   remove / relabel), verbatim contract strings (contracts/discord.md),
-   ids validated against the current watch list at interaction time.
+   remove / relabel) plus the US3 cadence control (``ctl.cadence`` →
+   modal; ``modal.cadence`` submit → validated update + scheduler
+   wakeup), verbatim contract strings (contracts/discord.md), ids
+   validated against the current watch list at interaction time.
 2. Client level — ``BotalertClient`` driven by ``FakeChannel``
    (tests/fakes.py): control-message lifecycle (``on_ready`` posts +
    stores the id, deletes the prior message, tolerates a missing prior
@@ -87,8 +89,19 @@ def make_client(
         ("ctl.remove:deadbeef0001", None, None),
         ("ctl.relabel:deadbeef0001", None, None),
         ("modal.relabel:deadbeef0001", None, "x"),
+        ("ctl.cadence", None, None),
+        ("modal.cadence", None, "2"),
     ],
-    ids=["view", "manage", "select", "remove", "relabel", "relabel-submit"],
+    ids=[
+        "view",
+        "manage",
+        "select",
+        "remove",
+        "relabel",
+        "relabel-submit",
+        "cadence",
+        "cadence-submit",
+    ],
 )
 def test_non_owner_rejected_without_state_access(
     tmp_path: Path, action: str, selected_value: str | None, modal_text: str | None
@@ -365,6 +378,100 @@ def test_relabel_submit_stale_id(tmp_path: Path) -> None:
     assert response.content == "⚠️ That product is no longer on the watch list."
 
 
+# ------------------------------------------------------------ ctl.cadence
+
+
+def make_cadence_router(tmp_path: Path) -> tuple[Router, StateStore, list[int]]:
+    """Router over a real store with a wakeup spy (US3 cadence tests)."""
+    config = make_config()
+    store = StateStore(str(tmp_path / "state.json"), config)
+    wakeups: list[int] = []
+    router = Router(
+        config, store, FakeClock(start=NOW), wakeup=lambda: wakeups.append(1)
+    )
+    return router, store, wakeups
+
+
+def test_cadence_button_opens_prefilled_modal(tmp_path: Path) -> None:
+    router, store, _wakeups = make_cadence_router(tmp_path)
+    store.set_cadence(7.5)
+    response = router.route(
+        InteractionRequest(user_id=OWNER_ID, action="ctl.cadence")
+    )
+    assert response.kind == "modal"
+    assert response.content is None
+    assert response.ephemeral is True
+    assert response.modal == ModalSpec(
+        custom_id="modal.cadence",
+        title="Change cadence",
+        fields=(
+            ModalFieldSpec(
+                custom_id="cadence.minutes",
+                label="Minutes",
+                placeholder="5",
+                default="7.5",  # pre-filled with the current cadence
+                max_length=10,
+                required=True,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2", "✅ new cadence 2 minutes"),
+        ("2.5", "✅ new cadence 2.5 minutes"),
+        ("1", "✅ new cadence 1 minutes"),
+        ("1440", "✅ new cadence 1440 minutes"),
+    ],
+    ids=["int", "float", "min-bound", "max-bound"],
+)
+def test_cadence_submit_valid_updates_wakes_and_confirms(
+    tmp_path: Path, raw: str, expected: str
+) -> None:
+    router, store, wakeups = make_cadence_router(tmp_path)
+    response = router.route(
+        InteractionRequest(user_id=OWNER_ID, action="modal.cadence", modal_text=raw)
+    )
+    assert response.kind == "message"
+    assert response.ephemeral is True
+    assert response.content == expected
+    assert store.get_cadence() == float(raw)
+    assert wakeups == [1]  # scheduler woken: new interval from the next cycle
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["abc", "0.5", "2000", "", "   ", "5,5", "1e2"],
+    ids=["malformed", "below-min", "above-max", "empty", "blank", "comma", "sci"],
+)
+def test_cadence_submit_invalid_rejected_unchanged(tmp_path: Path, raw: str) -> None:
+    router, store, wakeups = make_cadence_router(tmp_path)
+    response = router.route(
+        InteractionRequest(user_id=OWNER_ID, action="modal.cadence", modal_text=raw)
+    )
+    assert response.kind == "message"
+    assert response.ephemeral is True
+    assert response.content == (
+        "⚠️ Cadence must be a number of minutes between 1 and 1440. (current: 5)"
+    )
+    assert store.get_cadence() == 5.0  # current cadence unchanged
+    assert wakeups == []  # nothing to reschedule
+
+
+def test_cadence_rejection_reports_current_value(tmp_path: Path) -> None:
+    router, store, _wakeups = make_cadence_router(tmp_path)
+    store.set_cadence(7.5)
+    response = router.route(
+        InteractionRequest(user_id=OWNER_ID, action="modal.cadence", modal_text="0.5")
+    )
+    assert response.content == (
+        "⚠️ Cadence must be a number of minutes between 1 and 1440. (current: 7.5)"
+    )
+    assert store.get_cadence() == 7.5
+
+
 # ----------------------------------------------- client: control lifecycle
 
 
@@ -379,6 +486,7 @@ def test_on_ready_posts_control_message(tmp_path: Path) -> None:
     assert [(b.label, b.custom_id, b.url) for b in buttons] == [
         ("📋 View watch list", "ctl.view", None),
         ("⚙️ Manage products", "ctl.manage", None),
+        ("🔁 Change cadence", "ctl.cadence", None),
     ]
     assert store.get_control_message_id() == str(message_id)
     assert flags.gateway_connected is True
@@ -396,6 +504,7 @@ def test_on_ready_link_button_only_when_base_url_set(tmp_path: Path) -> None:
     assert [(b.label, b.custom_id, b.url) for b in buttons] == [
         ("📋 View watch list", "ctl.view", None),
         ("⚙️ Manage products", "ctl.manage", None),
+        ("🔁 Change cadence", "ctl.cadence", None),
         ("➕ Add product → dashboard", None, "http://127.0.0.1:8080"),
     ]
 
@@ -586,6 +695,72 @@ def test_on_interaction_modal_response_sends_modal(tmp_path: Path) -> None:
     assert item.max_length == 100
     assert item.required is True
     assert item.style is discord.TextStyle.short
+
+
+def test_on_interaction_cadence_button_sends_prefilled_modal(tmp_path: Path) -> None:
+    client, store, _channel, _flags = make_client(tmp_path)
+    store.set_cadence(7.5)
+    interaction = FakeInteraction(OWNER_ID, {"custom_id": "ctl.cadence"})
+    asyncio.run(client.on_interaction(interaction))
+    assert interaction.response.messages == []
+    assert len(interaction.response.modals) == 1
+    modal = interaction.response.modals[0]
+    assert modal.custom_id == "modal.cadence"
+    assert modal.title == "Change cadence"
+    assert len(modal.children) == 1
+    item = modal.children[0]
+    assert isinstance(item, discord.ui.TextInput)
+    assert item.custom_id == "cadence.minutes"
+    assert item.placeholder == "5"
+    assert item.default == "7.5"  # pre-filled with the current cadence
+    assert item.max_length == 10
+    assert item.required is True
+    assert item.style is discord.TextStyle.short
+
+
+def test_handle_modal_submit_cadence_relay_confirms(tmp_path: Path) -> None:
+    client, store, _channel, _flags = make_client(tmp_path)
+    interaction = FakeInteraction(OWNER_ID, {})
+    asyncio.run(client.handle_modal_submit(interaction, "modal.cadence", "2"))
+    assert store.get_cadence() == 2.0
+    assert interaction.response.messages == [("✅ new cadence 2 minutes", True, None)]
+
+
+def test_handle_modal_submit_cadence_relay_rejects(tmp_path: Path) -> None:
+    client, store, _channel, _flags = make_client(tmp_path)
+    interaction = FakeInteraction(OWNER_ID, {})
+    asyncio.run(client.handle_modal_submit(interaction, "modal.cadence", "0.5"))
+    assert store.get_cadence() == 5.0
+    assert interaction.response.messages == [
+        (
+            "⚠️ Cadence must be a number of minutes between 1 and 1440. (current: 5)",
+            True,
+            None,
+        )
+    ]
+
+
+def test_client_wakeup_plumbing_cadence(tmp_path: Path) -> None:
+    """A valid submit wakes the scheduler through the client (SC-004);
+    a rejection does not."""
+    config = make_config()
+    store = StateStore(str(tmp_path / "state.json"), config)
+    flags = RuntimeFlags()
+    wakeups: list[int] = []
+    client = BotalertClient(
+        config,
+        store,
+        flags,
+        channel=FakeChannel(),
+        wakeup=lambda: wakeups.append(1),
+    )
+    good = FakeInteraction(OWNER_ID, {})
+    asyncio.run(client.handle_modal_submit(good, "modal.cadence", "2"))
+    assert wakeups == [1]
+    bad = FakeInteraction(OWNER_ID, {})
+    asyncio.run(client.handle_modal_submit(bad, "modal.cadence", "0.5"))
+    assert wakeups == [1]  # unchanged — nothing to reschedule
+    assert store.get_cadence() == 2.0
 
 
 def test_on_interaction_non_owner_rejected(tmp_path: Path) -> None:

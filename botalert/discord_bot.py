@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Final, Literal, Mapping, Protocol, cast, overload
+from typing import Callable, Final, Literal, Mapping, Protocol, cast, overload
 
 import discord
 
@@ -45,6 +46,12 @@ EMPTY_LIST = "Watch list is empty — add products in the dashboard."
 STALE_PRODUCT = "⚠️ That product is no longer on the watch list."
 BAD_LABEL = "⚠️ Label must be 1–100 characters."
 UNKNOWN_CONTROL = "⚠️ Unknown control — nothing was changed."
+# {min}/{max} come from the config limits, {current} from the live store.
+BAD_CADENCE = (
+    "⚠️ Cadence must be a number of minutes between {min} and {max}. "
+    "(current: {current})"
+)
+CADENCE_CONFIRM = "✅ new cadence {value} minutes"
 
 _STATUS_EMOJI: Final[Mapping[StockStatus, str]] = {
     StockStatus.IN_STOCK: "🟢",
@@ -184,6 +191,33 @@ class StorePort(Protocol):
     def set_control_message_id(self, message_id: str | None) -> None: ...
 
 
+# --------------------------------------------------- cadence helpers
+
+
+def _format_minutes(value: float) -> str:
+    """Render minutes without a spurious decimal point (5.0 -> ``"5"``)."""
+    if value == int(value):
+        return str(int(value))
+    return str(value)
+
+
+_DECIMAL_MINUTES = re.compile(r"\d+(\.\d+)?")
+
+
+def _parse_cadence_minutes(raw: str) -> float | None:
+    """Strictly parse a plain, non-negative decimal number of minutes.
+
+    Only a bare decimal is accepted (``"2"``, ``"2.5"``) — no exponent
+    (``"1e2"``), no separators (``"5,5"``), no surrounding garbage. The
+    pattern also guarantees the result is finite. Returns ``None`` when
+    unparseable.
+    """
+    text = raw.strip()
+    if not _DECIMAL_MINUTES.fullmatch(text):
+        return None
+    return float(text)
+
+
 # ------------------------------------------------------------------ router
 
 
@@ -196,10 +230,20 @@ class Router:
     interaction time — stale ids get the stale-product notice.
     """
 
-    def __init__(self, config: Config, store: StorePort, clock: RouterClock) -> None:
+    def __init__(
+        self,
+        config: Config,
+        store: StorePort,
+        clock: RouterClock,
+        wakeup: Callable[[], None] | None = None,
+    ) -> None:
         self._config = config
         self._store = store
         self._clock = clock
+        # Scheduler wakeup hook (SC-004): a valid cadence change ends the
+        # current wait so the new interval applies from the next cycle.
+        # None (tests without a scheduler) → no-op.
+        self._wakeup = wakeup if wakeup is not None else (lambda: None)
 
     def route(self, request: InteractionRequest) -> InteractionResponse:
         if str(request.user_id) != self._config.owner_discord_id:
@@ -217,6 +261,10 @@ class Router:
             return self._route_relabel_button(action.split(":", 1)[1])
         if action.startswith("modal.relabel:"):
             return self._route_relabel_submit(action.split(":", 1)[1], request.modal_text)
+        if action == "ctl.cadence":
+            return self._route_cadence_button()
+        if action == "modal.cadence":
+            return self._route_cadence_submit(request.modal_text)
         return InteractionResponse(kind="message", content=UNKNOWN_CONTROL)
 
     # ------------------------------------------------------------ handlers
@@ -315,6 +363,46 @@ class Router:
         return InteractionResponse(
             kind="message",
             content=f"✅ Relabeled {product.label} → {modified.label}.",
+        )
+
+    def _route_cadence_button(self) -> InteractionResponse:
+        modal = ModalSpec(
+            custom_id="modal.cadence",
+            title="Change cadence",
+            fields=(
+                ModalFieldSpec(
+                    custom_id="cadence.minutes",
+                    label="Minutes",
+                    placeholder="5",
+                    default=_format_minutes(self._store.get_cadence()),
+                    max_length=10,
+                    required=True,
+                ),
+            ),
+        )
+        return InteractionResponse(kind="modal", modal=modal)
+
+    def _route_cadence_submit(self, modal_text: str | None) -> InteractionResponse:
+        value = _parse_cadence_minutes(modal_text or "")
+        if (
+            value is None
+            or value < self._config.min_cadence_minutes
+            or value > self._config.max_cadence_minutes
+        ):
+            # Store untouched, nothing to reschedule (SC-004).
+            return InteractionResponse(
+                kind="message",
+                content=BAD_CADENCE.format(
+                    min=_format_minutes(self._config.min_cadence_minutes),
+                    max=_format_minutes(self._config.max_cadence_minutes),
+                    current=_format_minutes(self._store.get_cadence()),
+                ),
+            )
+        self._store.set_cadence(value)
+        self._wakeup()
+        return InteractionResponse(
+            kind="message",
+            content=CADENCE_CONFIRM.format(value=_format_minutes(value)),
         )
 
     # ------------------------------------------------------------- helpers
@@ -445,13 +533,14 @@ class BotalertClient(discord.Client):
         store: StateStore,
         flags: RuntimeFlags,
         channel: ChannelPort | None = None,
+        wakeup: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(intents=discord.Intents.default())
         self._config = config
         self._store = store
         self._flags = flags
         self._channel = channel
-        self._router = Router(config, store, _UtcNowClock())
+        self._router = Router(config, store, _UtcNowClock(), wakeup=wakeup)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._buffered_notices: list[str] = []
 
@@ -561,6 +650,7 @@ class BotalertClient(discord.Client):
         buttons: list[ButtonSpec] = [
             ButtonSpec(label="📋 View watch list", custom_id="ctl.view"),
             ButtonSpec(label="⚙️ Manage products", custom_id="ctl.manage"),
+            ButtonSpec(label="🔁 Change cadence", custom_id="ctl.cadence"),
         ]
         if self._config.base_url is not None:
             # Link button last: the dashboard is the "add" path (US1).
