@@ -19,7 +19,15 @@ SCHEMA_VERSION: Final[int] = 1
 
 
 class ValidationError(Exception):
-    """A field value failed its data-model.md §2 constraint."""
+    """A field value failed its data-model.md §2 constraint.
+
+    ``field`` names the offending field ("url" | "label" | "indicator")
+    so the API layer can map it to the contract error code.
+    """
+
+    def __init__(self, message: str, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 class DuplicateUrlError(Exception):
@@ -48,10 +56,12 @@ def normalize_url(raw: str) -> str:
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         raise ValidationError(
-            f"url must be an absolute http:// or https:// URL: {raw!r}"
+            f"url must be an absolute http:// or https:// URL: {raw!r}", field="url"
         )
     if not parts.netloc:
-        raise ValidationError(f"url must have a non-empty host: {raw!r}")
+        raise ValidationError(
+            f"url must have a non-empty host: {raw!r}", field="url"
+        )
     normalized = f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}"
     if parts.query:
         normalized += f"?{parts.query}"
@@ -69,7 +79,9 @@ def validate_label(label: str) -> str:
     """Trim a label and enforce 1–100 chars after trim (data-model.md §2)."""
     trimmed = label.strip()
     if not 1 <= len(trimmed) <= 100:
-        raise ValidationError("label must be 1–100 characters after trim")
+        raise ValidationError(
+            "label must be 1–100 characters after trim", field="label"
+        )
     return trimmed
 
 
@@ -83,7 +95,9 @@ def validate_indicator(indicator: str | None) -> str | None:
         return None
     trimmed = indicator.strip()
     if len(trimmed) > 200:
-        raise ValidationError("indicator must be at most 200 characters")
+        raise ValidationError(
+            "indicator must be at most 200 characters", field="indicator"
+        )
     return trimmed or None
 
 
