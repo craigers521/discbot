@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>botalert — stock watch list</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #101418;
+      --panel: #1a2028;
+      --border: #2c3644;
+      --text: #e6ebf1;
+      --muted: #8b98a9;
+      --accent: #4dabf7;
+      --ok: #40c057;
+      --error: #fa5252;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    main { max-width: 960px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin: 0 0 1.5rem; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.5rem 0 0.2rem; }
+    input[type="text"], input[type="number"], input[type="password"], input[type="url"] {
+      width: 100%;
+      padding: 0.45rem 0.6rem;
+      font-size: 0.95rem;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    input:focus { outline: 1px solid var(--accent); }
+    button {
+      margin-top: 0.6rem;
+      padding: 0.45rem 0.9rem;
+      font-size: 0.9rem;
+      color: var(--text);
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.1); }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button.secondary { background: var(--panel); border: 1px solid var(--border); }
+    button.danger { background: var(--error); }
+    .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .row > div { flex: 1 1 180px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.5rem 0.4rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    td.url { word-break: break-all; color: var(--muted); }
+    .badge { white-space: nowrap; }
+    .failures { color: var(--error); }
+    .failures.ok { color: var(--muted); }
+    .actions { white-space: nowrap; }
+    .actions button { margin: 0 0.3rem 0 0; padding: 0.25rem 0.6rem; font-size: 0.8rem; }
+    #status-message { min-height: 1.4em; font-size: 0.9rem; margin: 0.5rem 0 0; }
+    #status-message.ok { color: var(--ok); }
+    #status-message.error { color: var(--error); }
+    #token-view.hidden, #main-view.hidden, #edit-panel.hidden { display: none; }
+    .hint { font-size: 0.8rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <!-- Token prompt: shown until a token is verified against the API. -->
+    <section id="token-view" class="card">
+      <h1>botalert</h1>
+      <p class="subtitle">Enter your dashboard token (env <code>BOTALERT_TOKEN</code>) to manage your watch list.</p>
+      <form id="token-form">
+        <label for="token-input">Token</label>
+        <input type="password" id="token-input" name="token" autocomplete="off" required>
+        <button type="submit" id="token-submit">Unlock</button>
+        <p id="token-message" role="alert" class="hint" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <!-- Main dashboard: rendered on load and after each operation only. -->
+    <section id="main-view" class="hidden">
+      <h1>botalert</h1>
+      <p class="subtitle">Personal stock watch list — <button id="token-reset" class="secondary" type="button" style="margin:0;display:inline-block">change token</button></p>
+      <p id="status-message" role="status" aria-live="polite"></p>
+
+      <section class="card">
+        <h2>Cadence</h2>
+        <form id="cadence-form">
+          <label for="cadence-input">Check interval (minutes)</label>
+          <div class="row">
+            <div>
+              <input type="number" id="cadence-input" name="cadence_minutes" step="any" min="1" max="1440">
+              <span class="hint" id="cadence-range"></span>
+            </div>
+          </div>
+          <button type="submit" id="cadence-save">Save cadence</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Add a product</h2>
+        <form id="add-form">
+          <label for="add-url">URL (required)</label>
+          <input type="url" id="add-url" name="url" required>
+          <div class="row">
+            <div>
+              <label for="add-label">Label (optional)</label>
+              <input type="text" id="add-label" name="label" maxlength="100">
+            </div>
+            <div>
+              <label for="add-in-indicator">In-stock indicator (optional)</label>
+              <input type="text" id="add-in-indicator" name="in_stock_indicator" maxlength="200">
+            </div>
+            <div>
+              <label for="add-out-indicator">Out-of-stock indicator (optional)</label>
+              <input type="text" id="add-out-indicator" name="out_of_stock_indicator" maxlength="200">
+            </div>
+          </div>
+          <button type="submit" id="add-submit">Add product</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Watch list</h2>
+        <button id="check-now" type="button">Check now</button>
+        <table id="products-table">
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>URL</th>
+              <th>Status</th>
+              <th>Last checked</th>
+              <th>Failures</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="products-body"></tbody>
+        </table>
+      </section>
+
+      <section id="edit-panel" class="card hidden">
+        <h2>Edit product</h2>
+        <form id="edit-form">
+          <p class="hint" id="edit-url-hint"></p>
+          <label for="edit-label">Label</label>
+          <input type="text" id="edit-label" name="label" maxlength="100" required>
+          <div class="row">
+            <div>
+              <label for="edit-in-indicator">In-stock indicator (blank clears it)</label>
+              <input type="text" id="edit-in-indicator" name="in_stock_indicator" maxlength="200">
+            </div>
+            <div>
+              <label for="edit-out-indicator">Out-of-stock indicator (blank clears it)</label>
+              <input type="text" id="edit-out-indicator" name="out_of_stock_indicator" maxlength="200">
+            </div>
+          </div>
+          <button type="submit" id="edit-save">Save changes</button>
+          <button type="button" id="edit-cancel" class="secondary">Cancel</button>
+        </form>
+      </section>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -162,6 +162,26 @@ class TestValidationRejection:
         assert store.modify_product("https://missing.example.com/x") is None
         assert store.remove_product("https://missing.example.com/x") is None
 
+    def test_modify_is_atomic_when_a_field_fails(self, state_path: str) -> None:
+        """A valid field alongside an invalid one applies NOTHING (the
+        update is one critical section; data-model.md §6)."""
+        store = make_store(state_path)
+        store.add_product(
+            "https://a.example.com/x",
+            label="Original",
+            in_stock_indicator="Old",
+        )
+        with pytest.raises(ValidationError):
+            store.modify_product(
+                "https://a.example.com/x",
+                label="Changed",
+                in_stock_indicator="i" * 201,
+            )
+        stored = store.get_product("https://a.example.com/x")
+        assert stored is not None
+        assert stored.label == "Original"  # valid field not partially applied
+        assert stored.in_stock_indicator == "Old"
+
 
 class TestCorruptionRecovery:
     def test_garbage_file_renamed_and_fresh_state(self, state_path: str) -> None:

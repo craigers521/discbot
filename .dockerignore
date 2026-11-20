@@ -1,0 +1,17 @@
+# Keep the build context minimal: the image only needs botalert/ and
+# requirements.txt (the Dockerfile copies exactly those two).
+.venv/
+.git/
+tests/
+specs/
+fixtures/
+sample-bot.py
+mypy.ini
+requirements-dev.txt
+__pycache__/
+*.pyc
+.env
+state.json*
+*.log
+Dockerfile
+.dockerignore

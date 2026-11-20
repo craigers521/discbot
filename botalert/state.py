@@ -323,26 +323,36 @@ class StateStore:
         """PATCH semantics: only provided fields change; '' clears an
         indicator (empty-string = clear); unknown URL → None.
 
-        Raises ValidationError on bad values.
+        Raises ValidationError on bad values. Every provided value is
+        validated BEFORE the product is touched, so a rejection applies
+        nothing — the read-modify-write stays one critical section with
+        no partial mutation (data-model.md §6).
         """
         try:
             normalized = normalize_url(url)
         except ValidationError:
             return None
+        new_label: str | None = None
+        new_in: str | None = None
+        new_out: str | None = None
+        if not isinstance(label, UnsetType):
+            new_label = validate_label(label)
+        if not isinstance(in_stock_indicator, UnsetType):
+            new_in = validate_indicator(in_stock_indicator)
+        if not isinstance(out_of_stock_indicator, UnsetType):
+            new_out = validate_indicator(out_of_stock_indicator)
         with self._lock:
             product = next(
                 (p for p in self._state.products if p.url == normalized), None
             )
             if product is None:
                 return None
-            if not isinstance(label, UnsetType):
-                product.label = validate_label(label)
+            if new_label is not None:
+                product.label = new_label
             if not isinstance(in_stock_indicator, UnsetType):
-                product.in_stock_indicator = validate_indicator(in_stock_indicator)
+                product.in_stock_indicator = new_in
             if not isinstance(out_of_stock_indicator, UnsetType):
-                product.out_of_stock_indicator = validate_indicator(
-                    out_of_stock_indicator
-                )
+                product.out_of_stock_indicator = new_out
             self._save()
             return copy.copy(product)
 

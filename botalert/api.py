@@ -13,6 +13,15 @@ Serves ``/api/*`` from the shared Flask app:
 - ``POST /api/products`` — add; ``201`` created product; ``400
   invalid_url`` / ``invalid_label`` / ``invalid_indicator``; ``409
   duplicate_url``; a successful add wakes the scheduler (SC-001).
+- ``PATCH /api/products?url=<url>`` — modify by URL query param (FR-004):
+  any of ``label`` / ``in_stock_indicator`` / ``out_of_stock_indicator``,
+  at least one required, empty-string indicator clears it; ``200`` updated
+  product; ``400 invalid_label`` / ``invalid_indicator`` / (empty body);
+  ``404 not_found``. Every provided value is validated before the store is
+  touched, so a rejection applies nothing; never wakes the scheduler.
+- ``DELETE /api/products?url=<url>`` — remove (FR-002); ``204`` no body
+  (failure counters vanish with the row); ``404 not_found``; never wakes
+  the scheduler.
 - ``POST /api/check-now`` — ``202 {"status": "cycle_scheduled"}`` plus
   scheduler wakeup, or ``409 cycle_in_progress`` (FR-018: no second
   cycle is started while one is in flight).
@@ -40,10 +49,13 @@ from flask import Blueprint, Response, jsonify, request
 
 from botalert.config import Config
 from botalert.models import DuplicateUrlError, Product, RuntimeFlags, ValidationError
-from botalert.state import StateStore
+from botalert.state import StateStore, UNSET
 
 #: Exact contract message for a normalized-URL collision (US4-6).
 _DUPLICATE_URL_MESSAGE = "A product with this URL is already monitored."
+
+#: ``not_found`` message for a URL no product is monitored at (US4).
+_NOT_FOUND_MESSAGE = "No product is monitored at this URL."
 
 _HEALTH_PATH = "/api/health"
 _TOKEN_HEADER = "X-Botalert-Token"
@@ -171,6 +183,80 @@ def create_api_blueprint(
 
         scheduler.wakeup()  # SC-001: a fresh watch list is not left waiting
         return jsonify(product.api_dict()), 201
+
+    @bp.patch("/products")
+    def modify_product() -> Response | tuple[Response, int]:
+        """Modify a product by its URL query param (FR-004, US4).
+
+        Body: any of ``label`` / ``in_stock_indicator`` /
+        ``out_of_stock_indicator``; at least one required; an
+        empty-string indicator clears it. The URL itself is immutable
+        (changing it = remove + add). Every provided value is validated
+        before the store is touched, so a 400 applies nothing (one
+        critical section, data-model.md §6). Never wakes the scheduler.
+        """
+        url = request.args.get("url")
+        payload = request.get_json(silent=True)
+        body: dict[str, object] = payload if isinstance(payload, dict) else {}
+        raw_label = body.get("label")
+        raw_in = body.get("in_stock_indicator")
+        raw_out = body.get("out_of_stock_indicator")
+        if (
+            raw_label is None
+            and raw_in is None
+            and raw_out is None
+        ):
+            return _error(
+                "invalid_label",
+                "provide at least one field to update: label, "
+                "in_stock_indicator or out_of_stock_indicator.",
+                400,
+            )
+        if raw_label is not None and not isinstance(raw_label, str):
+            return _error(
+                "invalid_label",
+                "label must be a string (1-100 characters).",
+                400,
+            )
+        if raw_in is not None and not isinstance(raw_in, str):
+            return _error(
+                "invalid_indicator",
+                "in_stock_indicator must be a string (at most 200 characters).",
+                400,
+            )
+        if raw_out is not None and not isinstance(raw_out, str):
+            return _error(
+                "invalid_indicator",
+                "out_of_stock_indicator must be a string (at most 200 characters).",
+                400,
+            )
+        try:
+            product = state.modify_product(
+                url or "",
+                label=raw_label if raw_label is not None else UNSET,
+                in_stock_indicator=raw_in if raw_in is not None else UNSET,
+                out_of_stock_indicator=raw_out
+                if raw_out is not None
+                else UNSET,
+            )
+        except ValidationError as exc:
+            return _error(_validation_code(exc), str(exc), 400)
+        if product is None:
+            return _error("not_found", _NOT_FOUND_MESSAGE, 404)
+        return jsonify(product.api_dict())
+
+    @bp.delete("/products")
+    def delete_product() -> Response | tuple[Response, int]:
+        """Remove a product by its URL query param (FR-002, US4).
+
+        No body. ``204`` with no body on success — the failure counters
+        vanish with the row (data-model.md §6). Never wakes the scheduler.
+        """
+        url = request.args.get("url")
+        removed = state.remove_product(url) if url else None
+        if removed is None:
+            return _error("not_found", _NOT_FOUND_MESSAGE, 404)
+        return Response(status=204)
 
     @bp.post("/check-now")
     def check_now() -> Response | tuple[Response, int]:
