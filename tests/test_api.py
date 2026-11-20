@@ -107,6 +107,16 @@ class TestAuthBoundary:
         response = client.get("/api/products", headers=headers("wrong-token"))
         assert_error(response, "unauthorized", 401)
 
+    def test_non_ascii_token_401_not_500(self, client: Any) -> None:
+        """A non-ASCII header is a wrong token, not a server error.
+
+        ``hmac.compare_digest`` on ``str`` raises ``TypeError`` for
+        non-ASCII input (→ 500); the guard compares UTF-8 bytes so the
+        contract 401 is returned (T046 audit).
+        """
+        response = client.get("/api/products", headers=headers("tökén"))
+        assert_error(response, "unauthorized", 401)
+
     def test_wrong_token_401_on_every_protected_endpoint(self, client: Any) -> None:
         for method, url, body in [
             ("get", "/api/products", None),

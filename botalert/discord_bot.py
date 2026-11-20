@@ -78,13 +78,15 @@ def _relative_ago(now: datetime, then: datetime) -> str:
 class RouterClock(Protocol):
     """Wall-clock seam for the router (tests use FakeClock)."""
 
-    def now(self) -> datetime: ...
+    def now(self) -> datetime:
+        """Current time, for the "checked X ago" view lines."""
 
 
 class _UtcNowClock:
     """Production clock: UTC wall time."""
 
     def now(self) -> datetime:
+        """The current UTC wall time."""
         return datetime.now(timezone.utc)
 
 
@@ -170,9 +172,11 @@ class StorePort(Protocol):
     satisfies it directly.
     """
 
-    def get_products(self) -> list[Product]: ...
+    def get_products(self) -> list[Product]:
+        """The watch list in insertion order."""
 
-    def remove_product(self, url: str) -> Product | None: ...
+    def remove_product(self, url: str) -> Product | None:
+        """Remove by (normalized) URL; the removed product, else None."""
 
     def modify_product(
         self,
@@ -180,15 +184,21 @@ class StorePort(Protocol):
         label: str | UnsetType = UNSET,
         in_stock_indicator: str | UnsetType = UNSET,
         out_of_stock_indicator: str | UnsetType = UNSET,
-    ) -> Product | None: ...
+    ) -> Product | None:
+        """Apply the non-UNSET fields (all validated first); the updated
+        product, or None when the URL is not monitored."""
 
-    def get_cadence(self) -> float: ...
+    def get_cadence(self) -> float:
+        """The current cadence in minutes."""
 
-    def set_cadence(self, minutes: float) -> None: ...
+    def set_cadence(self, minutes: float) -> None:
+        """Set the cadence; ValidationError outside [min, max]."""
 
-    def get_control_message_id(self) -> str | None: ...
+    def get_control_message_id(self) -> str | None:
+        """The stored control message id, or None when not posted yet."""
 
-    def set_control_message_id(self, message_id: str | None) -> None: ...
+    def set_control_message_id(self, message_id: str | None) -> None:
+        """Store the control message id (None clears it); persisted."""
 
 
 # --------------------------------------------------- cadence helpers
@@ -246,6 +256,13 @@ class Router:
         self._wakeup = wakeup if wakeup is not None else (lambda: None)
 
     def route(self, request: InteractionRequest) -> InteractionResponse:
+        """Route one interaction envelope to its response.
+
+        Authorization (SC-007) is the FIRST step: a non-owner gets the
+        exact rejection string with zero store access. Product ids are
+        validated against the current watch list at interaction time;
+        unknown actions get the exact unknown-control notice.
+        """
         if str(request.user_id) != self._config.owner_discord_id:
             return InteractionResponse(kind="message", content=NOT_AUTHORIZED)
         action = request.action
@@ -429,8 +446,11 @@ class Router:
 
 
 class UserPort(Protocol):
+    """The interacting user, as the router sees it (offline-seamable)."""
+
     @property
-    def id(self) -> int: ...
+    def id(self) -> int:
+        """The user's numeric Discord id (compared to OWNER_DISCORD_ID)."""
 
 
 class InteractionResponsePort(Protocol):
@@ -439,14 +459,17 @@ class InteractionResponsePort(Protocol):
     @overload
     async def send_message(
         self, *, content: str | None, ephemeral: bool
-    ) -> object: ...
+    ) -> object:
+        """Ephemeral message reply without a view."""
 
     @overload
     async def send_message(
         self, *, content: str | None, ephemeral: bool, view: discord.ui.View
-    ) -> object: ...
+    ) -> object:
+        """Ephemeral message reply carrying a component view."""
 
-    async def send_modal(self, modal: discord.ui.Modal, /) -> object: ...
+    async def send_modal(self, modal: discord.ui.Modal, /) -> object:
+        """Reply with a modal (relabel / cadence input)."""
 
 
 class InteractionPort(Protocol):
@@ -455,28 +478,37 @@ class InteractionPort(Protocol):
     type: discord.InteractionType
 
     @property
-    def data(self) -> object: ...
+    def data(self) -> object:
+        """The raw interaction data mapping (custom_id, values, ...)."""
 
     @property
-    def user(self) -> UserPort: ...
+    def user(self) -> UserPort:
+        """The interacting user."""
 
     @property
-    def response(self) -> InteractionResponsePort: ...
+    def response(self) -> InteractionResponsePort:
+        """The reply surface for this interaction."""
 
 
 class MessagePort(Protocol):
-    @property
-    def message_id(self) -> int: ...
+    """A Discord message the client can delete (offline-seamable)."""
 
-    async def delete(self) -> None: ...
+    @property
+    def message_id(self) -> int:
+        """The message's numeric id (stored for self-healing)."""
+
+    async def delete(self) -> None:
+        """Delete the message (callers tolerate it having vanished)."""
 
 
 class ChannelPort(Protocol):
     """The management channel, as seen by the client (offline-seamable)."""
 
-    async def send(self, content: str, view: discord.ui.View | None) -> MessagePort: ...
+    async def send(self, content: str, view: discord.ui.View | None) -> MessagePort:
+        """Send a message (optionally with a view); the sent message."""
 
-    async def get_message(self, message_id: int) -> MessagePort | None: ...
+    async def get_message(self, message_id: int) -> MessagePort | None:
+        """Fetch a message by id, or None when it is gone."""
 
 
 # ------------------------------------------------------------ adapters
@@ -490,6 +522,7 @@ class DiscordMessage:
         self.message_id: int = message.id
 
     async def delete(self) -> None:
+        """Delete the backing discord.Message (HTTP errors propagate)."""
         await self._message.delete()
 
 
@@ -500,6 +533,7 @@ class DiscordChannel:
         self._channel = channel
 
     async def send(self, content: str, view: discord.ui.View | None) -> MessagePort:
+        """Send via the channel; wrap the result in a MessagePort."""
         if view is None:
             message = await self._channel.send(content)
         else:
@@ -507,6 +541,7 @@ class DiscordChannel:
         return DiscordMessage(message)
 
     async def get_message(self, message_id: int) -> MessagePort | None:
+        """Fetch by id; discord.NotFound → None (a gone message)."""
         try:
             message = await self._channel.fetch_message(message_id)
         except discord.NotFound:
@@ -547,6 +582,8 @@ class BotalertClient(discord.Client):
     # ------------------------------------------------------ lifecycle
 
     async def on_ready(self) -> None:
+        """Gateway ready: post the control message, arm the gateway flag,
+        and flush the pre-ready notice buffer exactly once."""
         # discord.Client.loop is a sentinel until the gateway connects;
         # capture the running loop for cross-thread notice dispatch.
         self._loop = asyncio.get_running_loop()
@@ -567,6 +604,7 @@ class BotalertClient(discord.Client):
                     )
 
     def on_disconnect(self) -> None:
+        """Gateway disconnected: clear the gateway flag (health endpoint)."""
         self._flags.gateway_connected = False
 
     def stop(self) -> None:
@@ -693,8 +731,12 @@ class BotalertClient(discord.Client):
     # ------------------------------------------------------ interaction
 
     async def on_interaction(self, interaction: InteractionPort) -> None:
-        # Modal submits (type 5) are relayed by SpecModal.on_submit;
-        # this handler only acts on component interactions (type 3).
+        """Component interaction → router → ephemeral reply (SC-007:
+        the router authorizes on the very first step).
+
+        Modal submits (type 5) are relayed by SpecModal.on_submit;
+        this handler only acts on component interactions (type 3).
+        """
         if interaction.type is not discord.InteractionType.component:
             return
         data = cast(Mapping[str, object], interaction.data)
@@ -718,6 +760,7 @@ class BotalertClient(discord.Client):
     async def handle_modal_submit(
         self, interaction: InteractionPort, action: str, text: str
     ) -> None:
+        """Modal submission (relayed by SpecModal) → router → reply."""
         request = InteractionRequest(
             user_id=interaction.user.id,
             action=action,
@@ -801,6 +844,8 @@ class SpecModal(discord.ui.Modal):
             )
 
     async def on_submit(self, interaction: InteractionPort, /) -> None:
+        """Collect the text inputs and relay them to the client's router
+        (shared by the US2 relabel and US3 cadence modals)."""
         values = [
             item.value
             for item in self.children

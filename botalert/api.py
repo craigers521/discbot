@@ -68,7 +68,8 @@ class SchedulerWakeup(Protocol):
     ``tests.fakes.FakeScheduler`` (SC-001).
     """
 
-    def wakeup(self) -> None: ...
+    def wakeup(self) -> None:
+        """End the current wait early; a no-op while a cycle is in flight."""
 
 
 def _error(code: str, message: str, status: int) -> tuple[Response, int]:
@@ -101,11 +102,18 @@ def create_api_blueprint(
 
     @bp.before_request
     def _auth_guard() -> tuple[Response, int] | None:
-        """Constant-time token check before any state access (SC-008)."""
+        """Constant-time token check before any state access (SC-008).
+
+        Compared as UTF-8 bytes: ``hmac.compare_digest`` on ``str``
+        raises ``TypeError`` for non-ASCII input, which would surface a
+        bogus 500 instead of the contract 401 for a garbage header.
+        """
         if request.path == _HEALTH_PATH:
             return None
         provided = request.headers.get(_TOKEN_HEADER)
-        if provided is None or not hmac.compare_digest(provided, config.token):
+        if provided is None or not hmac.compare_digest(
+            provided.encode("utf-8"), config.token.encode("utf-8")
+        ):
             return _error(
                 "unauthorized",
                 "missing or invalid X-Botalert-Token header.",

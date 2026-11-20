@@ -34,9 +34,11 @@ from botalert.stock import determine_status
 class Clock(Protocol):
     """Wall-clock seam: ``now()`` stamps results, ``sleep()`` paces fetches."""
 
-    def now(self) -> datetime: ...
+    def now(self) -> datetime:
+        """The shared stamp applied to every check of the cycle."""
 
-    def sleep(self, seconds: float) -> None: ...
+    def sleep(self, seconds: float) -> None:
+        """The fixed pause BETWEEN page fetches (not after the last)."""
 
 
 #: One page fetch per URL (botalert.fetcher.fetch_page or a test fake).

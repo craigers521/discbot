@@ -266,10 +266,12 @@ class StateStore:
             return None
 
     def get_cadence(self) -> float:
+        """The current cadence in minutes (re-read every scheduler wait)."""
         with self._lock:
             return self._state.cadence_minutes
 
     def get_control_message_id(self) -> str | None:
+        """The stored control message id, or None when not posted yet."""
         with self._lock:
             return self._state.control_message_id
 
@@ -369,6 +371,7 @@ class StateStore:
             self._save()
 
     def set_control_message_id(self, message_id: str | None) -> None:
+        """Store the control message id (None clears it); persisted."""
         with self._lock:
             self._state.control_message_id = message_id
             self._save()
