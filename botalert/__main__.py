@@ -16,6 +16,11 @@ Wires the US1 + US2 pieces together:
 5. ``Scheduler`` background thread (cycle = ``run_cycle``).
 6. Flask app (``web.create_app``) served on the main thread.
 
+``LOG_LEVEL`` (optional env, default ``INFO``) sets the process-wide
+logging level — ``DEBUG`` additionally logs the exact phrase that
+matched a stock determination and one-line page snippets for
+``unknown`` results (the "fetched fine but nothing matched" case).
+
 ``SIGINT``/``SIGTERM`` → stop the scheduler and the bot (join; no
 graceful drain beyond the in-flight fetch's ``CHECK_TIMEOUT_SECONDS``,
 research.md §5) → exit 0.
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import signal
 import sys
 import threading
@@ -46,6 +52,21 @@ from botalert.web import create_app, run_app
 
 logger = logging.getLogger("botalert")
 
+#: LOG_LEVEL env values accepted verbatim (stdlib level names, upper).
+_VALID_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+
+def _resolve_log_level() -> str:
+    """LOG_LEVEL env override (default INFO); invalid names → INFO."""
+    raw = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    if raw in _VALID_LOG_LEVELS:
+        return raw
+    print(
+        f"botalert: invalid LOG_LEVEL {raw!r}; falling back to INFO",
+        file=sys.stderr,
+    )
+    return "INFO"
+
 
 class WallClock:
     """Production clock for the checker: real UTC now, real sleep."""
@@ -62,7 +83,7 @@ class WallClock:
 def main() -> int:
     """Run botalert: scheduler thread + Flask on the main thread."""
     logging.basicConfig(
-        level=logging.INFO,
+        level=_resolve_log_level(),
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
@@ -74,6 +95,20 @@ def main() -> int:
 
     state = StateStore(config.state_file, config)
     flags = RuntimeFlags()
+    # Effective check configuration (no secrets — T046): this line is the
+    # first thing to compare against expectations after a deploy.
+    logger.info(
+        "botalert starting: %d watched product(s), cadence %g min, "
+        "fetch timeout %ds, inter-fetch pause %ds, failure threshold %d, "
+        "user agent %r, state file %s",
+        len(state.get_products()),
+        state.get_cadence(),
+        config.check_timeout_seconds,
+        config.check_pause_seconds,
+        config.failure_threshold,
+        config.user_agent,
+        config.state_file,
+    )
 
     fetcher: FetchFn = functools.partial(
         fetch_page,

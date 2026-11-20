@@ -8,6 +8,7 @@ SC-006 scale case (25 products at a 5-minute cadence fit in the interval).
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -268,3 +269,43 @@ class TestScale:
         wait.wake()
         scheduler.stop()
         assert wait.timeouts[0] == pytest.approx(300.0)
+
+
+class TestCrashResilience:
+    def test_cycle_crash_is_logged_and_loop_survives(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = make_state(tmp_path)
+        flags = RuntimeFlags()
+        wait = ScriptedWait(results=[True, True])
+        count = 0
+
+        def cycle_fn(snapshot: list[Product]) -> None:
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise RuntimeError("simulated cycle crash")
+
+        scheduler = Scheduler(store, flags, cycle_fn, wait=wait, signal=wait.wake)
+        with caplog.at_level(logging.ERROR, logger="botalert.scheduler"):
+            scheduler.start()
+            deadline = time.monotonic() + 5
+            while count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            scheduler.stop()
+        # Cycle 1 raised; the loop must have survived and run cycle 2
+        # (a dead scheduler thread = checks silently stop, no log at all).
+        assert count == 2
+        # The crash was logged with its traceback (in the record's
+        # exc_info) and the loop explicitly continued.
+        crashed = [
+            record
+            for record in caplog.records
+            if record.exc_info is not None
+            and "simulated cycle crash" in str(record.exc_info[1])
+        ]
+        assert crashed
+        assert any(
+            "continuing with the next cycle" in record.message
+            for record in caplog.records
+        )

@@ -9,6 +9,7 @@ state saved after each product, webhook-failure channel notice.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -228,3 +229,67 @@ class TestWebhookDeliveryFailure:
         harness.webhook = FakeWebhook()
         harness.run([product])
         assert harness.webhook.messages == []
+
+
+class TestLogging:
+    """Observability contract: a failing check must be visible in the
+    container log (caplog) — this is the fix for "no log output".
+
+    Asserts the log LINES only; state behavior is covered above and must
+    be unaffected by logging.
+    """
+
+    def test_failed_check_logs_warning_with_url_error_and_summary(
+        self, harness: Harness, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = harness.build()
+        product = store.add_product("https://a.example.com/i", label="A")
+        harness.fetcher.set_error("https://a.example.com/i", "HTTP 444")
+        with caplog.at_level(logging.INFO, logger="botalert.checker"):
+            harness.run([product])
+        messages = [record.message for record in caplog.records]
+        # The per-product line names the product, its URL and the error.
+        assert any(
+            "A" in m and "https://a.example.com/i" in m and "HTTP 444" in m
+            for m in messages
+        )
+        # The cycle summary counts the error so the shape of a bad cycle
+        # (all-blocked vs. one-off) is visible at a glance.
+        assert any(
+            "check cycle summary" in m and "1 error(s)" in m for m in messages
+        )
+
+    def test_unknown_check_logs_warning_and_debug_page_snippet(
+        self, harness: Harness, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = harness.build()
+        product = store.add_product("https://a.example.com/i", label="A")
+        # Fetched fine (200) but nothing matches — the silent failure mode.
+        harness.fetcher.set_page(
+            "https://a.example.com/i", "<p>challenge interstitial body</p>"
+        )
+        with caplog.at_level(logging.DEBUG, logger="botalert.checker"):
+            harness.run([product])
+        messages = [record.message for record in caplog.records]
+        assert any(
+            "unknown" in m and "no indicator" in m and "A" in m for m in messages
+        )
+        # The DEBUG snippet carries the page text that did not match.
+        assert any("challenge interstitial body" in m for m in messages)
+
+    def test_determined_check_logs_status_with_previous_status(
+        self, harness: Harness, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = harness.build()
+        product = store.add_product("https://a.example.com/i", label="A")
+        url = "https://a.example.com/i"
+        harness.fetcher.set_page(url, OUT_HTML)
+        harness.run([product])  # unknown → out_of_stock (no logging here)
+        harness.fetcher.set_page(url, IN_HTML)
+        with caplog.at_level(logging.INFO, logger="botalert.checker"):
+            # Fresh snapshot like the scheduler takes each cycle: its
+            # last_status is the PRE-check status the log's "was" quotes.
+            harness.run([store.get_products()[0]])  # out_of_stock → in_stock
+        messages = [record.message for record in caplog.records]
+        assert any("in_stock (was out_of_stock)" in m for m in messages)
+        assert any("restock transition" in m for m in messages)

@@ -136,6 +136,7 @@ required variables fail fast at startup if missing or empty.
 | `MIN_CADENCE_MINUTES` | ❌ | `1` | enforced cadence floor |
 | `MAX_CADENCE_MINUTES` | ❌ | `1440` | enforced cadence ceiling (24 h) |
 | `USER_AGENT` | ❌ | `botalert/0.1 (personal stock checker)` | User-Agent sent with page fetches |
+| `LOG_LEVEL` | ❌ | `INFO` | process-wide logging level (`DEBUG` adds stock-phrase match details and page snippets for `unknown` results) |
 
 `python-dotenv` loads `.env` in local development only; the container
 receives the same variables via `--env-file`.

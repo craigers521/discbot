@@ -17,15 +17,24 @@ The cycle receives the watch-list snapshot captured just before it runs
 returns ``True`` when woken early, and ``signal()`` is what ``wakeup()``
 and ``stop()`` use to end a pending wait. Defaults are a plain
 ``threading.Event``.
+
+A cycle that raises is logged with its traceback (``logger.exception``)
+and the loop CONTINUES to the next cycle — the scheduler thread must
+never die silently, or the bot would stop checking with no log line at
+all.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections.abc import Callable
 
 from botalert.models import Product, RuntimeFlags
 from botalert.state import StateStore
+
+logger = logging.getLogger(__name__)
 
 
 class Scheduler:
@@ -72,10 +81,19 @@ class Scheduler:
             if self._stop.is_set():
                 break
             self._flags.cycle_in_progress = True
+            started = time.monotonic()
             try:
                 self._cycle_fn(self._store.get_products())
+            except Exception:
+                logger.exception(
+                    "check cycle raised; continuing with the next cycle"
+                )
             finally:
                 self._flags.cycle_in_progress = False
+                logger.info(
+                    "check cycle finished in %.1fs",
+                    time.monotonic() - started,
+                )
 
     def wakeup(self) -> None:
         """End the current wait early; no-op while a cycle is in flight."""

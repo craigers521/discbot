@@ -11,9 +11,12 @@ not exclusivity); a page matching both heuristic sets is in-stock
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
 from botalert.models import Product, StockStatus
+
+logger = logging.getLogger(__name__)
 
 #: Built-in in-stock phrase set (frozen data table, research.md §6).
 IN_STOCK_PHRASES: Final[frozenset[str]] = frozenset(
@@ -49,14 +52,29 @@ def determine_status(html: str, product: Product) -> StockStatus:
     text = html.lower()
     in_indicator = product.in_stock_indicator
     if in_indicator is not None and in_indicator.lower() in text:
+        logger.debug(
+            "determine_status: matched product in-stock indicator %r",
+            in_indicator,
+        )
         return StockStatus.IN_STOCK
     out_indicator = product.out_of_stock_indicator
     if out_indicator is not None and out_indicator.lower() in text:
+        logger.debug(
+            "determine_status: matched product out-of-stock indicator %r",
+            out_indicator,
+        )
         return StockStatus.OUT_OF_STOCK
-    if any(phrase in text for phrase in IN_STOCK_PHRASES):
-        return StockStatus.IN_STOCK
-    if any(phrase in text for phrase in OUT_OF_STOCK_PHRASES):
-        return StockStatus.OUT_OF_STOCK
+    for phrase in IN_STOCK_PHRASES:
+        if phrase in text:
+            logger.debug("determine_status: matched built-in phrase %r", phrase)
+            return StockStatus.IN_STOCK
+    for phrase in OUT_OF_STOCK_PHRASES:
+        if phrase in text:
+            logger.debug("determine_status: matched built-in phrase %r", phrase)
+            return StockStatus.OUT_OF_STOCK
+    logger.debug(
+        "determine_status: no indicator or built-in phrase matched; UNKNOWN"
+    )
     return StockStatus.UNKNOWN
 
 
